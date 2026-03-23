@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/pem"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,11 +16,14 @@ import (
 	"crypto/ed25519"
 	"crypto/rsa"
 	"errors"
-	"reflect"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
+
+func init() {
+	log.SetFlags(0)
+}
 
 func readEntity(keypath string) (*openpgp.Entity, error) {
 	f, err := os.Open(keypath)
@@ -40,15 +44,15 @@ var (
 	UnsupportedKeyType = errors.New("only ed25519 and rsa keys are supported")
 )
 
-func getEDDSAKey(castkey *eddsa.PrivateKey) []byte {
-	log.Println("public key type:", reflect.TypeOf(castkey.PublicKey))
+func getEDDSAKey(castkey *eddsa.PrivateKey) ([]byte, []byte) {
 	var pubkey ed25519.PublicKey = castkey.PublicKey.X
 
 	sshPub, err := ssh.NewPublicKey(pubkey)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("public SSH key:\n" + string(ssh.MarshalAuthorizedKey(sshPub)))
+	publicSSHKey := ssh.MarshalAuthorizedKey(sshPub)
+	log.Println("public SSH key:\n" + string(publicSSHKey))
 
 	var privkey = ed25519.NewKeyFromSeed(castkey.D)
 
@@ -56,91 +60,131 @@ func getEDDSAKey(castkey *eddsa.PrivateKey) []byte {
 	if err != nil {
 		log.Fatal(err)
 	}
-	return pem.EncodeToMemory(privPem)
+	privateKeyPem := pem.EncodeToMemory(privPem)
+	return privateKeyPem, publicSSHKey
 }
 
-func getRSAKey(castkey *rsa.PrivateKey) []byte {
-
-	log.Println("public key type:", reflect.TypeOf(castkey.PublicKey))
+func getRSAKey(castkey *rsa.PrivateKey) ([]byte, []byte) {
 	var pubkey rsa.PublicKey = castkey.PublicKey
 
 	sshPub, err := ssh.NewPublicKey(&pubkey)
 	if err != nil {
 		log.Fatal(err)
 	}
-	log.Println("public SSH key:\n" + string(ssh.MarshalAuthorizedKey(sshPub)))
-
-	// var privkey = ed25519.NewKeyFromSeed(castkey.D)
+	publicSSHKey := ssh.MarshalAuthorizedKey(sshPub)
+	log.Println("public SSH key:\n" + string(publicSSHKey))
 
 	privPem, err := ssh.MarshalPrivateKey(castkey, "")
 	if err != nil {
 		log.Fatal(err)
 	}
-	return pem.EncodeToMemory(privPem)
+	privateKeyPem := pem.EncodeToMemory(privPem)
+	return privateKeyPem, publicSSHKey
+}
+
+func saveKeysToFile(baseFilename string, privateKeyPem []byte, publicSSHKey []byte) error {
+	privateKeyFile := baseFilename
+	if err := os.WriteFile(privateKeyFile, privateKeyPem, 0600); err != nil {
+		return fmt.Errorf("failed to save private key: %w", err)
+	}
+	log.Printf("Private key saved to: %s", privateKeyFile)
+
+	publicKeyFile := baseFilename + ".pub"
+	if err := os.WriteFile(publicKeyFile, publicSSHKey, 0644); err != nil {
+		return fmt.Errorf("failed to save public key: %w", err)
+	}
+	log.Printf("Public key saved to: %s", publicKeyFile)
+
+	return nil
 }
 
 func main() {
-	var keyfile string
-	log.Println("Enter path to private PGP key (default: ./priv.asc):")
-	_, err := fmt.Scanf("%s", &keyfile)
-	if err != nil && err.Error() == "unexpected newline" {
-		keyfile = "./priv.asc"
-	} else if err != nil {
-		log.Fatal(err)
+	keyfile := flag.String("f", "./priv.asc", "Path to private PGP key file")
+	password := flag.String("p", "", "Passphrase to decrypt PGP key")
+	keyIndex := flag.Int("n", -1, "Index of the key to use (0 for primary key)")
+	listKeys := flag.Bool("l", false, "List all available keys")
+	saveFile := flag.String("s", "", "Save private and public keys to file (e.g., -s ./id_ed25519)")
+
+	flag.Parse()
+
+	if _, err := os.Stat(*keyfile); err != nil {
+		if os.IsNotExist(err) {
+			log.Fatalf("Error: Private key file not found: %s\n", *keyfile)
+		}
+		log.Fatalf("Error accessing key file: %v\n", err)
 	}
 
-	e, err := readEntity(keyfile)
+	e, err := readEntity(*keyfile)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	log.Println("Keys:")
-	log.Println("[0]", e.PrimaryKey.KeyIdString()+" (primary)")
-	for i := 0; i < len(e.Subkeys); i++ {
-		log.Println(fmt.Sprintf("[%d]", i+1), e.Subkeys[i].PrivateKey.KeyIdString()+" (subkey)")
+	if *keyIndex == -1 {
+		log.Println("Keys:")
+		log.Println("[0]", e.PrimaryKey.KeyIdString()+" (primary)")
+		for i := 0; i < len(e.Subkeys); i++ {
+			log.Println(fmt.Sprintf("[%d]", i+1), e.Subkeys[i].PrivateKey.KeyIdString()+" (subkey)")
+		}
 	}
 
-	log.Println("Choose key by index (default: 0):")
+	if *listKeys {
+		return
+	}
 
-	var keyIndex int
-	_, err = fmt.Scanf("%d", &keyIndex)
-	if err != nil && err.Error() == "unexpected newline" {
-		keyIndex = 0
-	} else if err != nil {
-		log.Fatal(err)
+	if *keyIndex < 0 || *keyIndex > len(e.Subkeys) {
+		log.Fatalf("Invalid key index: %d\n", *keyIndex)
 	}
 
 	var targetKey *packet.PrivateKey
-	if keyIndex == 0 {
-		log.Println(fmt.Sprintf("Continuing with key [%d]", keyIndex), e.PrimaryKey.KeyIdString())
+	if *keyIndex == 0 {
+		log.Println(fmt.Sprintf("Continuing with key [%d]", *keyIndex), e.PrimaryKey.KeyIdString())
 		targetKey = e.PrivateKey
-	} else if keyIndex > 0 {
-		var subkey = e.Subkeys[keyIndex-1]
-		log.Println(fmt.Sprintf("Continuing with key [%d]", keyIndex), subkey.PrivateKey.KeyIdString())
-		targetKey = subkey.PrivateKey
 	} else {
-		log.Fatal("Invalid key index")
+		var subkey = e.Subkeys[*keyIndex-1]
+		log.Println(fmt.Sprintf("Continuing with key [%d]", *keyIndex), subkey.PrivateKey.KeyIdString())
+		targetKey = subkey.PrivateKey
 	}
 
 	if targetKey.Encrypted {
-		log.Println("Please enter passphrase to decrypt PGP key:")
-		bytePassphrase, err := term.ReadPassword(int(syscall.Stdin))
-		if err != nil {
-			log.Fatal(err)
+		var bytePassphrase []byte
+		if *password != "" {
+			bytePassphrase = []byte(*password)
+		} else {
+			fmt.Fprint(os.Stderr, "Please enter passphrase to decrypt PGP key: ")
+			var err error
+			bytePassphrase, err = term.ReadPassword(int(syscall.Stdin))
+			if err != nil {
+				log.Fatal(err)
+			}
+			fmt.Fprintln(os.Stderr)
 		}
 		targetKey.Decrypt(bytePassphrase)
 	}
-	log.Println("private key type:", reflect.TypeOf(targetKey.PrivateKey))
+
 	castkey_eddsa, ok_eddsa := targetKey.PrivateKey.(*eddsa.PrivateKey)
 	if ok_eddsa {
-		privateKeyPem := getEDDSAKey(castkey_eddsa)
-		log.Println("Private SSH key:\n" + string(privateKeyPem))
+		privateKeyPem, publicSSHKey := getEDDSAKey(castkey_eddsa)
+
+		if *saveFile != "" {
+			if err := saveKeysToFile(*saveFile, privateKeyPem, publicSSHKey); err != nil {
+				log.Fatalf("Error saving keys: %v\n", err)
+			}
+		} else {
+			log.Println("Private SSH key:\n" + string(privateKeyPem))
+		}
 		return
 	}
 	castkey_rsa, ok_rsa := targetKey.PrivateKey.(*rsa.PrivateKey)
 	if ok_rsa {
-		privateKeyPem := getRSAKey(castkey_rsa)
-		log.Println("Private SSH key:\n" + string(privateKeyPem))
+		privateKeyPem, publicSSHKey := getRSAKey(castkey_rsa)
+
+		if *saveFile != "" {
+			if err := saveKeysToFile(*saveFile, privateKeyPem, publicSSHKey); err != nil {
+				log.Fatalf("Error saving keys: %v\n", err)
+			}
+		} else {
+			log.Println("Private SSH key:\n" + string(privateKeyPem))
+		}
 		return
 	}
 }

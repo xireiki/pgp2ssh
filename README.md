@@ -34,6 +34,18 @@ If you have multiple subkeys, usually it is the authenticate key highlighted wit
 ❯ ./pgp2ssh
 ```
 
+Or
+
+```sh
+❯ go build
+❯ ./pgp2ssh -l
+Keys:
+[0] XXXXXXXXXXXXXXXX (primary)
+[1] XXXXXXXXXXXXXXX1 (subkey)
+[2] XXXXXXXXXXXXXXX2 (subkey)
+❯ ./pgp2ssh -f ./priv.asc -n 1 -p <password>
+```
+
 **Nix/NixOS Users**
 
 A flake is provided for Nix users. Just use `nix run` instead of building and
